@@ -18,6 +18,7 @@ use crate::kurbo::{Affine, Rect, Vec2};
 use crate::math::snap_up;
 use crate::tile::Tile;
 use crate::util::RectExt;
+use smallvec::SmallVec;
 
 pub mod color_matrix;
 pub mod drop_shadow;
@@ -42,13 +43,40 @@ pub enum PreparedFilter {
 
 impl PreparedFilter {
     /// Build a new prepared filter for the given transform.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the graph does not hold exactly one primitive, or if that primitive is not
+    /// implemented. See [`PreparedFilter::from_primitive`] and [`PreparedFilter::chain`] for
+    /// the non-panicking variants.
     pub fn new(filter: &Filter, transform: &Affine) -> Self {
         // Multi-primitive filter graphs are not yet implemented.
         if filter.graph.primitives.len() != 1 {
             unimplemented!("Multi-primitive filter graphs are not yet supported");
         }
 
-        match &filter.graph.primitives[0] {
+        Self::from_primitive(&filter.graph.primitives[0], transform)
+            .expect("Other filter primitives not yet implemented")
+    }
+
+    /// Prepare every primitive of a filter graph, in the order they are applied (see
+    /// [`FilterGraph`](crate::filter_effects::FilterGraph)).
+    ///
+    /// Returns `None` if any primitive is not implemented.
+    pub fn chain(filter: &Filter, transform: &Affine) -> Option<SmallVec<[Self; 1]>> {
+        filter
+            .graph
+            .primitives
+            .iter()
+            .map(|primitive| Self::from_primitive(primitive, transform))
+            .collect()
+    }
+
+    /// Prepare a single filter primitive for the given transform.
+    ///
+    /// Returns `None` for primitives that are not implemented yet.
+    pub fn from_primitive(primitive: &FilterPrimitive, transform: &Affine) -> Option<Self> {
+        Some(match primitive {
             FilterPrimitive::Flood { color } => {
                 let flood = Flood::new(*color);
                 Self::Flood(flood)
@@ -101,12 +129,9 @@ impl PreparedFilter {
                 Self::Offset(offset)
             }
             FilterPrimitive::ColorMatrix { matrix } => Self::ColorMatrix(ColorMatrix::new(*matrix)),
-            _ => {
-                // Other primitives like Blend, ComponentTransfer, etc.
-                // are not yet implemented
-                unimplemented!("Other filter primitives not yet implemented");
-            }
-        }
+            // Other primitives like Blend, ComponentTransfer, etc. are not yet implemented.
+            _ => return None,
+        })
     }
 }
 

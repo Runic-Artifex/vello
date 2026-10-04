@@ -16,7 +16,7 @@
 //! **Filter Functions:**
 //! - `Blur` - Gaussian blur effect
 //!
-//! **Filter Primitives (Single Use Only):**
+//! **Filter Primitives:**
 //! - `Flood` - Solid color fill
 //! - `GaussianBlur` - Gaussian blur filter
 //! - `DropShadow` - Drop shadow effect (compound primitive)
@@ -24,13 +24,13 @@
 //! - `ColorMatrix` - Matrix-based color transformation
 //! - `Offset` - Translation/shift (single primitive)
 //!
-//! **Note:** Currently only single primitive filters are supported. Filter graphs with
-//! multiple connected primitives are not yet implemented.
+//! **Note:** A graph with several primitives is executed as a linear chain: each primitive
+//! is applied to the result of the previous one, as in a CSS filter list. Connecting
+//! primitives through `FilterInputs` is not implemented yet.
 //!
 //! ### 🚧 Not Yet Implemented
 //!
 //! **Core Features:**
-//! - `FilterGraph` execution - Chaining multiple filter primitives together
 //! - `FilterInputs` - Connecting primitives to create complex effects
 //!
 //! **Filter Functions:**
@@ -92,9 +92,17 @@ impl Filter {
     /// Creates a simple filter graph with a single primitive.
     /// Use this for direct access to low-level SVG filter operations.
     pub fn from_primitive(primitive: FilterPrimitive) -> Self {
+        Self::from_primitives([primitive])
+    }
+
+    /// Create a filter that applies the given primitives one after another, each to the
+    /// result of the previous one, like a CSS filter list (`filter: blur(2px) sepia(1)`).
+    pub fn from_primitives(primitives: impl IntoIterator<Item = FilterPrimitive>) -> Self {
         let mut graph = FilterGraph::new();
-        let filter_id = graph.add(primitive, None);
-        graph.set_output(filter_id);
+        for primitive in primitives {
+            let filter_id = graph.add(primitive, None);
+            graph.set_output(filter_id);
+        }
 
         Self {
             graph: Arc::new(graph),
@@ -146,6 +154,9 @@ impl Filter {
 ///
 /// The graph represents a pipeline of filter primitives where outputs of some
 /// primitives can be used as inputs to others. Each primitive has a unique `FilterId`.
+///
+/// Inputs are not implemented yet: the primitives are applied in insertion order, each to
+/// the result of the previous one, and the first to the source graphic.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilterGraph {
     /// All filter primitives in the graph, stored in insertion order.
@@ -186,8 +197,10 @@ impl FilterGraph {
         let id = FilterId(self.next_id);
         self.next_id += 1;
 
-        self.filter_expansion = self.filter_expansion.union(primitive.filter_expansion());
-        self.source_expansion = self.source_expansion.union(primitive.source_expansion());
+        // Each primitive is applied to the result of the previous one, so its expansion
+        // extends the area the chain already covers (a Minkowski sum of the rects).
+        self.filter_expansion = add_expansions(self.filter_expansion, primitive.filter_expansion());
+        self.source_expansion = add_expansions(self.source_expansion, primitive.source_expansion());
 
         self.primitives.push(primitive);
 
@@ -651,6 +664,11 @@ impl FilterPrimitive {
     }
 }
 
+/// The expansion of two filters applied one after the other.
+fn add_expansions(a: Rect, b: Rect) -> Rect {
+    Rect::new(a.x0 + b.x0, a.y0 + b.y0, a.x1 + b.x1, a.y1 + b.y1)
+}
+
 fn blur_radius(std_deviation: f32) -> f64 {
     // Gaussian blur expands uniformly by 3*sigma (covers 99.7% of distribution)
     f64::from(std_deviation * 3.0)
@@ -670,6 +688,28 @@ mod expansion_tests {
             p.filter_expansion(),
             Rect::new(0.0, -3.0, 2.5, 0.0),
             "Offset expansion should be asymmetric and include the shift vector"
+        );
+    }
+
+    #[test]
+    fn chained_expansions_add_up() {
+        let blur = |std_deviation| FilterPrimitive::GaussianBlur {
+            std_deviation,
+            edge_mode: EdgeMode::None,
+        };
+        let filter = crate::filter_effects::Filter::from_primitives([
+            blur(2.0),
+            FilterPrimitive::Offset { dx: 5.0, dy: -4.0 },
+            blur(1.0),
+        ]);
+        let identity = crate::kurbo::Affine::IDENTITY;
+        assert_eq!(
+            filter.filter_expansion(&identity),
+            Rect::new(-9.0, -13.0, 14.0, 9.0)
+        );
+        assert_eq!(
+            filter.source_expansion(&identity),
+            Rect::new(-14.0, -9.0, 9.0, 13.0)
         );
     }
 
