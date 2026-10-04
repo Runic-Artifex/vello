@@ -1200,7 +1200,7 @@ fn main(
 
                 for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
                     // Transform fragment location to local 'uv' space of the rounded rectangle.
-                    let my_xy = vec2(xy.x + f32(i), xy.y);
+                    let my_xy = vec2(xy.x + f32(i) + 0.5, xy.y + 0.5);
                     let local_xy = blur.matrx.xy * my_xy.x + blur.matrx.zw * my_xy.y + blur.xlat;
                     let x = local_xy.x;
                     let y = local_xy.y;
@@ -1224,7 +1224,7 @@ fn main(
             }
             case CMD_LIN_GRAD: {
                 let lin = read_lin_grad(cmd_ix);
-                let d = lin.line_x * xy.x + lin.line_y * xy.y + lin.line_c;
+                let d = lin.line_x * (xy.x + 0.5) + lin.line_y * (xy.y + 0.5) + lin.line_c;
                 for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
                     let my_d = d + lin.line_x * f32(i);
                     let x = i32(round(extend_mode_normalized(my_d, lin.extend_mode) * f32(GRADIENT_WIDTH - 1)));
@@ -1246,7 +1246,7 @@ fn main(
                 let less_scale = select(1.0, -1.0, is_swapped || (1.0 - focal_x) < 0.0);
                 let t_sign = sign(1.0 - focal_x);
                 for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
-                    let my_xy = vec2(xy.x + f32(i), xy.y);
+                    let my_xy = vec2(xy.x + f32(i) + 0.5, xy.y + 0.5);
                     let local_xy = rad.matrx.xy * my_xy.x + rad.matrx.zw * my_xy.y + rad.xlat;
                     let x = local_xy.x;
                     let y = local_xy.y;
@@ -1283,7 +1283,7 @@ fn main(
                 let sweep = read_sweep_grad(cmd_ix);
                 let scale = 1.0 / (sweep.t1 - sweep.t0);
                 for (var i = 0u; i < PIXELS_PER_THREAD; i += 1u) {
-                    let my_xy = vec2(xy.x + f32(i), xy.y);
+                    let my_xy = vec2(xy.x + f32(i) + 0.5, xy.y + 0.5);
                     let local_xy = sweep.matrx.xy * my_xy.x + sweep.matrx.zw * my_xy.y + sweep.xlat;
                     let x = local_xy.x;
                     let y = local_xy.y;
