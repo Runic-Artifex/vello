@@ -31,6 +31,49 @@ fn apply_color_matrix(pixmap: &mut Pixmap, matrix: &[f32; 20]) {
     }
 }
 
+/// Apply consecutive color matrices of a filter chain in one pass.
+///
+/// Each matrix is applied to the straight-alpha result of the previous one and clamped,
+/// as when they are applied one after another, but the intermediate results stay in `f32`
+/// instead of being rounded to 8 bits after each matrix.
+pub(crate) fn apply_color_matrices(pixmap: &mut Pixmap, matrices: &[[f32; 20]]) {
+    match matrices {
+        [] => {}
+        [matrix] => apply_color_matrix(pixmap, matrix),
+        _ => map_pixels(pixmap, |pixel| apply_straight_chain(pixel, matrices)),
+    }
+}
+
+/// Apply several matrices to the straight-alpha color of a pixel, one after another.
+#[inline]
+fn apply_straight_chain(pixel: PremulRgba8, matrices: &[[f32; 20]]) -> PremulRgba8 {
+    let a = u8_to_norm(pixel.a);
+    // The color of a fully transparent pixel is undefined; treat it as transparent black.
+    let inv_a = if pixel.a == 0 { 0.0 } else { 1.0 / a };
+    let [r, g, b] = [pixel.r, pixel.g, pixel.b].map(|c| u8_to_norm(c) * inv_a);
+    let mut color = [r, g, b, a];
+    for matrix in matrices {
+        let [r, g, b, a] = color;
+        color = core::array::from_fn(|row| {
+            let i = row * 5;
+            (matrix[i] * r
+                + matrix[i + 1] * g
+                + matrix[i + 2] * b
+                + matrix[i + 3] * a
+                + matrix[i + 4])
+                .clamp(0.0, 1.0)
+        });
+    }
+    let [r, g, b, out_a] = color;
+
+    PremulRgba8 {
+        r: round_u8(r * out_a * 255.0),
+        g: round_u8(g * out_a * 255.0),
+        b: round_u8(b * out_a * 255.0),
+        a: round_u8(out_a * 255.0),
+    }
+}
+
 #[inline]
 fn map_pixels(pixmap: &mut Pixmap, f: impl Fn(PremulRgba8) -> PremulRgba8) {
     for pixel in pixmap.data_mut() {
