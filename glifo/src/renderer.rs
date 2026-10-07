@@ -4,7 +4,7 @@
 //! Shared glyph rendering logic for rendering backends.
 
 use crate::atlas::commands::{AtlasCommand, AtlasCommandRecorder};
-use crate::atlas::key::subpixel_offset;
+use crate::atlas::key::{subpixel_offset, subpixel_x_origin};
 use crate::atlas::{AtlasSlot, GlyphAtlas, GlyphCacheKey, ImageCache, RasterMetrics};
 use crate::colr::ColrPainter;
 use crate::glyph::{
@@ -526,7 +526,7 @@ fn render_outline_glyph_from_atlas(
 ) {
     let [_, _, _, _, tx, ty] = outline_transform.as_coeffs();
     let rect_transform = Affine::translate((
-        tx.floor() + atlas_slot.bearing_x as f64,
+        subpixel_x_origin(tx) + atlas_slot.bearing_x as f64,
         ty.floor() + atlas_slot.bearing_y as f64,
     ));
     let area = Rect::new(0.0, 0.0, atlas_slot.width as f64, atlas_slot.height as f64);

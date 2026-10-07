@@ -184,13 +184,12 @@ pub(crate) fn pack_color(color: AlphaColor<Srgb>) -> u32 {
 
 /// Quantize a fractional pixel offset into one of [`SUBPIXEL_BUCKETS`] buckets.
 ///
-/// Values near 1.0 (>= 0.875 with 4 buckets) are clamped to the last bucket
-/// rather than wrapping to 0. Wrapping to bucket 0 without also incrementing the
-/// integer pixel coordinate would shift the glyph by ~0.75px in the wrong
-/// direction. Clamping keeps the worst-case error to 0.125px.
+/// Rounding through the last bucket wraps to zero. The matching integer
+/// coordinate must come from `subpixel_x_origin`, so crossing a pixel boundary
+/// carries into placement instead of clamping the glyph to the previous bucket.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "result is clamped to SUBPIXEL_BUCKETS-1 which fits in u8"
+    reason = "rounded normalized fraction is at most SUBPIXEL_BUCKETS, which fits in u8"
 )]
 #[inline]
 fn quantize_subpixel(frac: f32) -> u8 {
@@ -200,7 +199,19 @@ fn quantize_subpixel(frac: f32) -> u8 {
     } else {
         normalized
     };
-    ((normalized * SUBPIXEL_BUCKETS as f32).round() as u8).min(SUBPIXEL_BUCKETS - 1)
+    ((normalized * SUBPIXEL_BUCKETS as f32 + 0.5).floor() as u8) % SUBPIXEL_BUCKETS
+}
+
+/// Integer pixel origin paired with a rounded outline glyph cache bucket.
+/// Use floor after the half-bucket bias for consistent negative coordinates.
+pub(crate) fn subpixel_x_origin(x: f64) -> f64 {
+    quantize_outline_x(x).floor()
+}
+
+/// Device position shared by cached and directly drawn hinted outlines.
+pub(crate) fn quantize_outline_x(x: f64) -> f64 {
+    let buckets = f64::from(SUBPIXEL_BUCKETS);
+    (x * buckets + 0.5).floor() / buckets
 }
 
 /// Convert a quantized bucket index back to the fractional pixel offset it represents.
@@ -227,8 +238,29 @@ mod tests {
         assert_eq!(quantize_subpixel(0.6), 2);
         assert_eq!(quantize_subpixel(0.7), 3);
         assert_eq!(quantize_subpixel(0.75), 3);
-        assert_eq!(quantize_subpixel(0.9), 3);
+        assert_eq!(quantize_subpixel(0.874), 3);
+        assert_eq!(quantize_subpixel(0.875), 0);
+        assert_eq!(quantize_subpixel(0.9), 0);
+        assert_eq!(quantize_subpixel(-0.1), 0);
         assert_eq!(quantize_subpixel(1.0), 0);
+    }
+
+    #[test]
+    fn rounded_positions_carry_across_positive_and_negative_pixel_boundaries() {
+        for (x, expected) in [
+            (0.874, 0.75),
+            (0.875, 1.0),
+            (1.9, 2.0),
+            (-0.126, -0.25),
+            (-0.125, 0.0),
+            (-1.125, -1.0),
+        ] {
+            let bucket = quantize_subpixel(x as f32);
+            assert_eq!(
+                subpixel_x_origin(x) + f64::from(subpixel_offset(bucket)),
+                expected
+            );
+        }
     }
 
     #[test]

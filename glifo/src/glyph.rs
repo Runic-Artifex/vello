@@ -12,6 +12,7 @@ only break in edge cases, and some of them are also only related to conversions 
 use crate::Pixmap;
 use crate::atlas::AtlasSlot;
 use crate::atlas::GlyphCacheKey;
+use crate::atlas::key::quantize_outline_x;
 use crate::atlas::key::{SUBPIXEL_BITMAP, SUBPIXEL_COLR, pack_color};
 use crate::atlas::{GlyphAtlas, ImageCache};
 use crate::color::PremulRgba8;
@@ -1273,7 +1274,7 @@ impl GlyphScaleProperties {
 /// - Glyph position within the run
 /// - Run-space glyph positioning
 /// - Y-axis flip (fonts use upside-down coordinate system)
-/// - Hinting adjustments (snap y-offset to integer)
+/// - Hinting adjustments (quarter-pixel x and integer y in device space)
 fn calculate_outline_transform(
     glyph: Glyph,
     draw_props: DrawProps,
@@ -1285,6 +1286,11 @@ fn calculate_outline_transform(
         .as_coeffs();
 
     if hinting_instance.is_some() {
+        // Keep cached and directly rendered hinted outlines on the same
+        // quarter-pixel device grid. Quantize the complete position so a
+        // fractional run transform participates and pixel-boundary carries
+        // are retained (including negative coordinates).
+        final_transform[4] = quantize_outline_x(final_transform[4]);
         final_transform[5] = final_transform[5].round();
     }
 
@@ -1764,16 +1770,31 @@ fn prepare_glyph_run<'a>(run: GlyphRun<'a>, hint_cache: &'a mut HintCache) -> Pr
     }
 }
 
-// TODO: Although these are sane defaults, we might want to make them
-// configurable.
-const HINTING_OPTIONS: HintingOptions = HintingOptions {
-    engine: skrifa::outline::Engine::AutoFallback,
-    target: skrifa::outline::Target::Smooth {
-        mode: skrifa::outline::SmoothMode::Lcd,
-        symmetric_rendering: false,
-        preserve_linear_metrics: true,
-    },
-};
+// TrueType outlines use vertical auto hinting. Linear advances are supplied
+// by the layout engine; hinting only changes the drawn outlines. This matches
+// the light-hinting path in Skia's Fontations backend. Keep the interpreter
+// policy for other outline formats until they have separate rendering coverage.
+fn hinting_options(format: Option<OutlineGlyphFormat>) -> HintingOptions {
+    if format == Some(OutlineGlyphFormat::Glyf) {
+        HintingOptions {
+            engine: skrifa::outline::Engine::Auto(None),
+            target: skrifa::outline::Target::Smooth {
+                mode: skrifa::outline::SmoothMode::Light,
+                symmetric_rendering: true,
+                preserve_linear_metrics: false,
+            },
+        }
+    } else {
+        HintingOptions {
+            engine: skrifa::outline::Engine::AutoFallback,
+            target: skrifa::outline::Target::Smooth {
+                mode: skrifa::outline::SmoothMode::Lcd,
+                symmetric_rendering: false,
+                preserve_linear_metrics: true,
+            },
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct OutlinePath {
@@ -2168,7 +2189,7 @@ impl HintKey<'_> {
             self.outlines,
             Size::new(self.size),
             self.coords,
-            HINTING_OPTIONS,
+            hinting_options(self.outlines.format()),
         )
         .ok()
     }
@@ -2219,7 +2240,7 @@ impl HintCache {
                     key.outlines,
                     Size::new(key.size),
                     key.coords,
-                    HINTING_OPTIONS,
+                    hinting_options(key.outlines.format()),
                 )
                 .ok()?;
         }
@@ -2398,6 +2419,75 @@ mod tests {
         fn atlas_paint_transform(&self, atlas_slot: &AtlasSlot) -> Affine {
             Affine::translate((-(atlas_slot.x as f64), -(atlas_slot.y as f64)))
         }
+    }
+
+    #[test]
+    fn hinted_device_origins_include_run_translation_and_scale() {
+        let font = test_font(TestGlyphKind::Outline);
+        let mut hints = HintCache::default();
+        for (transform, glyph_x, hint, expected) in [
+            (Affine::translate((0.125, 20.125)), 0.75, true, 1.0),
+            (Affine::translate((-1.125, 20.125)), 0.75, true, -0.25),
+            (
+                Affine::scale(2.0).then_translate(Vec2::new(0.125, 20.125)),
+                0.375,
+                true,
+                1.0,
+            ),
+            (Affine::translate((0.125, 20.125)), 0.75, false, 0.875),
+        ] {
+            let run = GlyphRun {
+                font: font.clone(),
+                font_size: 16.0,
+                font_embolden: FontEmbolden::default(),
+                transform,
+                scene_paint_transform: transform,
+                glyph_transform: None,
+                normalized_coords: &[],
+                hint,
+            };
+            let prepared = prepare_glyph_run(run, &mut hints);
+            assert_eq!(prepared.hinting_instance.is_some(), hint);
+            let positioned = calculate_outline_transform(
+                Glyph {
+                    id: 0,
+                    x: glyph_x,
+                    y: 0.0,
+                },
+                prepared.draw_props,
+                prepared.hinting_instance,
+            );
+            assert_eq!(positioned.translation().x, expected);
+            assert_eq!(positioned.translation().y, if hint { 20.0 } else { 20.125 });
+        }
+        let transform = Affine::rotate(0.2).then_translate(Vec2::new(0.125, 20.125));
+        let run = GlyphRun {
+            font,
+            font_size: 16.0,
+            font_embolden: FontEmbolden::default(),
+            transform,
+            scene_paint_transform: transform,
+            glyph_transform: None,
+            normalized_coords: &[],
+            hint: true,
+        };
+        let prepared = prepare_glyph_run(run, &mut hints);
+        assert!(prepared.hinting_instance.is_none());
+        let positioned = calculate_outline_transform(
+            Glyph {
+                id: 0,
+                x: 0.75,
+                y: 0.0,
+            },
+            prepared.draw_props,
+            None,
+        );
+        assert_eq!(
+            positioned,
+            transform
+                .pre_translate(Vec2::new(0.75, 0.0))
+                .pre_scale_non_uniform(1.0, -1.0)
+        );
     }
 
     fn test_font(kind: TestGlyphKind) -> FontData {
